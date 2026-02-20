@@ -1,3 +1,7 @@
+"""
+crawler.py - 야후 재팬 뉴스 통합 검색 및 Google 번역 모듈
+"""
+
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
@@ -5,95 +9,94 @@ from urllib.parse import quote, urljoin
 import time
 import re
 
-# ... (기존 HEADERS, KEYWORD_TRANSLATIONS 동일)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,ja;q=0.6,zh-CN;q=0.5",
+}
 
+# 기존 키워드 맵핑 유지
+KEYWORD_TRANSLATIONS = {
+    "무신사":      {"ja": "ムシンサ",          "zh": "MUSINSA",   "tw": "MUSINSA"},
+    "한국 패션":   {"ja": "韓国ファッション", "zh": "韩国时尚",   "tw": "韓國時尚"},
+    "K-뷰티":      {"ja": "Kビューティー",   "zh": "K美妆",     "tw": "K美妝"},
+    "이커머스":    {"ja": "EC",              "zh": "电商",      "tw": "電商"},
+    "패션":        {"ja": "ファッション",     "zh": "时尚",      "tw": "時尚"},
+    "리테일":      {"ja": "リテール",        "zh": "零售",      "tw": "零售"},
+    "뷰티":        {"ja": "ビューティー",     "zh": "美妆",      "tw": "美妝"},
+    "SPA":         {"ja": "SPA",             "zh": "SPA",       "tw": "SPA"},
+    "럭셔리":      {"ja": "ラグジュアリー",  "zh": "奢侈品",    "tw": "奢侈品"},
+    "지속가능성":  {"ja": "サステナビリティ", "zh": "可持续发展", "tw": "永續發展"},
+}
+
+# 매체 설정 (일본은 야후 뉴스로 통합)
 SOURCES = {
     "japan": [
         {
-            "name": "Yahoo Japan News",
-            "url": "https://news.yahoo.co.jp",
-            # [개선] 기사 탭에서 최신순(pub)으로 검색
-            "search_url": "https://news.yahoo.co.jp/search?p={keyword}&ei=utf-8&sort=pub",
+            "name": "Yahoo Japan News", 
+            "url": "https://news.yahoo.co.jp", 
+            "search_url": "https://news.yahoo.co.jp/search?p={keyword}&ei=utf-8&sort=pub", 
             "language": "ja", 
             "flag": "🇯🇵"
         },
     ],
     "china": [
-        # ... (기존 중국 소스 유지)
+        {"name": "界面新闻", "url": "https://www.jiemian.com", "search_url": "https://www.jiemian.com/search.html?keywords={keyword}", "language": "zh", "flag": "🇨🇳"},
+        {"name": "36氪", "url": "https://36kr.com", "search_url": "https://36kr.com/search/articles/{keyword}", "language": "zh", "flag": "🇨🇳"},
+        {"name": "第一财经", "url": "https://www.yicai.com", "search_url": "https://www.yicai.com/search/?keys={keyword}", "language": "zh", "flag": "🇨🇳"},
+        {"name": "Luxe.co", "url": "https://luxe.co", "search_url": "https://luxe.co/?s={keyword}", "language": "zh", "flag": "🇨🇳"},
     ],
     "taiwan": [
-        # ... (기존 대만 소스 유지)
+        {"name": "數位時代", "url": "https://www.bnext.com.tw", "search_url": "https://www.bnext.com.tw/search/{keyword}", "language": "tw", "flag": "🇹🇼"},
+        {"name": "工商時報", "url": "https://www.ctee.com.tw", "search_url": "https://www.ctee.com.tw/search?q={keyword}", "language": "tw", "flag": "🇹🇼"},
     ],
 }
 
+# 날짜 파싱 유틸리티
+def parse_date(text: str):
+    if not text: return None
+    text = text.strip()
+    now = datetime.now()
+    # 야후 재팬 전용 상대 시간 처리
+    if '分前' in text:
+        m = re.search(r'(\d+)', text)
+        return now - timedelta(minutes=int(m.group(1))) if m else now
+    if '時間前' in text:
+        m = re.search(r'(\d+)', text)
+        return now - timedelta(hours=int(m.group(1))) if m else now
+    if '昨日' in text:
+        return now - timedelta(days=1)
+    
+    patterns = [
+        (r"\d{4}-\d{2}-\d{2}", "%Y-%m-%d"),
+        (r"\d{4}/\d{2}/\d{2}", "%Y/%m/%d"),
+        (r"\d{4}年\d{1,2}월\d{1,2}일", "%Y年%m월%d일"),
+    ]
+    for pattern, fmt in patterns:
+        m = re.search(pattern, text)
+        if m:
+            try: return datetime.strptime(m.group(0), fmt)
+            except: continue
+    return None
+
+def clean_text(text: str) -> str:
+    if not text: return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+# Google 번역 API
+def translate_to_korean(text: str, src_lang: str = "auto") -> str:
+    if not text or not text.strip(): return text
+    try:
+        resp = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": src_lang, "tl": "ko", "dt": "t", "q": text},
+            timeout=10, headers=HEADERS
+        )
+        return "".join(seg[0] for seg in resp.json()[0] if seg[0]).strip()
+    except: return text
+
 class NewsCrawler:
     def __init__(self, days: int = 7):
-        self.days = days
         self.cutoff = datetime.now() - timedelta(days=days)
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
-
-    # [신규] 야후 재팬 전용 상대 시간 파싱 (n시간 전 등)
-    def parse_relative_date(self, text: str) -> datetime:
-        now = datetime.now()
-        if '분 전' in text or '分前' in text:
-            m = re.search(r'(\d+)', text)
-            return now - timedelta(minutes=int(m.group(1))) if m else now
-        if '시간 전' in text or '時間前' in text:
-            m = re.search(r'(\d+)', text)
-            return now - timedelta(hours=int(m.group(1))) if m else now
-        if '어제' in text or '昨日' in text:
-            return now - timedelta(days=1)
-        
-        # 일반 날짜 패턴 시도
-        parsed = parse_date(text)
-        return parsed if parsed else now
-
-    def is_within_cutoff(self, date_str: str) -> bool:
-        dt = self.parse_relative_date(date_str)
-        return dt >= self.cutoff
-
-    def parse_yahoo_japan(self, soup: BeautifulSoup) -> list[dict]:
-        """야후 재팬 뉴스 검색 결과 전용 파서"""
-        results = []
-        # 야후 뉴스 검색 결과 카드 셀렉터
-        items = soup.select('li.sw-Card') 
-        for item in items:
-            title_tag = item.select_one('h3.sw-Card__title')
-            a_tag = item.select_one('a.sw-Card__titleInner')
-            date_tag = item.select_one('span.sw-Card__time')
-            source_tag = item.select_one('span.sw-Card__sender') # 원문 매체명 (WWD, Fashionsnap 등)
-
-            if title_tag and a_tag:
-                title = clean_text(title_tag.get_text())
-                url = a_tag['href']
-                date_text = date_tag.get_text() if date_tag else ""
-                source_name = source_tag.get_text() if source_tag else "Yahoo News"
-
-                if self.is_within_cutoff(date_text):
-                    results.append({
-                        "title": title,
-                        "url": url,
-                        "date": date_text,
-                        "source": source_name, # 야후 내 실제 출처 표시
-                        "flag": "🇯🇵",
-                        "language": "ja"
-                    })
-        return results
-
-    def search_source(self, source: dict, keyword: str) -> list[dict]:
-        print(f"  검색 시도: {source['name']} ({keyword})")
-        soup = self.fetch(source["search_url"].format(keyword=quote(keyword)))
-        if not soup: return []
-
-        # 일본(야후)인 경우 전용 파서 사용, 나머지는 범용 파서 사용
-        if source["name"] == "Yahoo Japan News":
-            return self.parse_yahoo_japan(soup)
-        
-        results = self.parse_generic(soup, source["url"])
-        for r in results:
-            r.update({"source": source["name"], "source_url": source["url"],
-                       "language": source["language"], "flag": source.get("flag", "")})
-        return results
-
-# ... (이하 translate_articles, run_pipeline 등 기존 로직 유지)
