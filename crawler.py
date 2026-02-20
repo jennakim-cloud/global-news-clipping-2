@@ -37,7 +37,9 @@ SOURCES = {
         {"name": "Fashionsnap",      "url": "https://www.fashionsnap.com",   "search_url": "https://www.fashionsnap.com/?s={keyword}",                  "language": "ja", "flag": "🇯🇵"},
         {"name": "Yahoo Japan",      "url": "https://news.yahoo.co.jp",      "search_url": "https://news.yahoo.co.jp/search?p={keyword}&ei=UTF-8",      "language": "ja", "flag": "🇯🇵"},
         {"name": "日経MJ",           "url": "https://www.nikkei.com",        "search_url": "https://www.nikkei.com/search?keyword={keyword}",           "language": "ja", "flag": "🇯🇵"},
-        {"name": "繊研新聞",         "url": "https://senken.co.jp",          "search_url": "https://senken.co.jp/?s={keyword}",                         "language": "ja", "flag": "🇯🇵"},
+        {"name": "繊研新聞",         "url": "https://senken.co.jp",          "search_url": "https://senken.co.jp/?s={keyword}",                         "language": "ja", "flag": "🇯🇵",
+         "exclude_url_patterns": ["/categories/", "/tags/", "/authors/", "/page/"],
+         "exclude_exact_urls": ["https://senken.co.jp/posts"]},
     ],
     "china": [
         {"name": "界面新闻",         "url": "https://www.jiemian.com",       "search_url": "https://www.jiemian.com/search.html?keywords={keyword}",    "language": "zh", "flag": "🇨🇳"},
@@ -220,6 +222,21 @@ class NewsCrawler:
         if not soup:
             return []
         results = self.parse_generic(soup, source["url"])
+
+        # 매체별 제외 URL 패턴 필터링 (카테고리/태그 링크 등 비기사 제거)
+        exclude_patterns   = source.get("exclude_url_patterns", [])
+        exclude_exact_urls = set(source.get("exclude_exact_urls", []))
+        if exclude_patterns or exclude_exact_urls:
+            before = len(results)
+            results = [
+                r for r in results
+                if r.get("url", "") not in exclude_exact_urls
+                and not any(pat in r.get("url", "") for pat in exclude_patterns)
+            ]
+            removed = before - len(results)
+            if removed:
+                print(f"  [{source['name']}] 비기사 링크 {removed}건 제외 (카테고리/태그 등)")
+
         for r in results:
             r.update({"source": source["name"], "source_url": source["url"],
                        "language": source["language"], "flag": source.get("flag", "")})
