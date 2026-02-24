@@ -6,7 +6,7 @@ app.py - 글로벌 뉴스 클리핑 Streamlit 앱
 import streamlit as st
 from datetime import datetime
 import html as html_lib
-import subprocess, sys, os
+import subprocess, sys
 
 from crawler import run_pipeline, SOURCES, KEYWORD_TRANSLATIONS
 
@@ -19,7 +19,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─── CSS ────────────────────────────────────────────────────────────────────
+# ─── CSS ─────────────────────────────────────────────────────────────────────
 
 st.markdown("""
 <style>
@@ -39,7 +39,6 @@ html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif; }
     transition: box-shadow 0.2s;
 }
 .article-card:hover { box-shadow: 0 3px 12px rgba(0,0,0,0.1); }
-.musinsa-card { border-left-color: #e63946; }
 
 .article-title-ko { font-size: 0.95rem; font-weight: 600; color: #1a1a2e; margin-bottom: 0.2rem; }
 .article-title-ko a { text-decoration: none; color: inherit; }
@@ -57,13 +56,12 @@ html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── 헬퍼 ───────────────────────────────────────────────────────────────────
+# ─── 헬퍼 ────────────────────────────────────────────────────────────────────
 
 def safe(text: str) -> str:
-    """[Fix 3] HTML 특수문자 이스케이프 - 원문에 HTML이 섞여도 안전하게 표시"""
     return html_lib.escape(str(text or ""))
 
-def render_card(article: dict, is_musinsa: bool = False):
+def render_card(article: dict):
     title_ko   = safe(article.get("title_ko") or article.get("title", ""))
     title_orig = safe(article.get("title", ""))
     url        = html_lib.escape(article.get("url", "#"))
@@ -71,12 +69,10 @@ def render_card(article: dict, is_musinsa: bool = False):
     flag       = article.get("flag", "")
     date       = article.get("date", "")
     date_str   = date[:10] if date else ""
-
-    card_cls   = "article-card musinsa-card" if is_musinsa else "article-card"
     date_badge = f'<span class="badge-date">📅 {date_str}</span>' if date_str else ""
 
     st.markdown(f"""
-    <div class="{card_cls}">
+    <div class="article-card">
         <div class="article-title-ko"><a href="{url}" target="_blank">{title_ko}</a></div>
         <div class="article-title-orig">{title_orig}</div>
         <div class="article-meta">
@@ -87,16 +83,14 @@ def render_card(article: dict, is_musinsa: bool = False):
     """, unsafe_allow_html=True)
 
 
-# ─── [Fix 2] Word 문서 생성 (python-docx) ────────────────────────────────────
+# ─── Word 문서 생성 ───────────────────────────────────────────────────────────
 
 def build_docx(result: dict) -> bytes:
-    """결과를 .docx 바이트로 변환"""
     try:
         from docx import Document
         from docx.shared import Pt, RGBColor, Inches
         from docx.enum.text import WD_ALIGN_PARAGRAPH
     except ImportError:
-        # 런타임 설치 시도
         subprocess.check_call([sys.executable, "-m", "pip", "install", "python-docx", "-q"])
         from docx import Document
         from docx.shared import Pt, RGBColor, Inches
@@ -107,16 +101,13 @@ def build_docx(result: dict) -> bytes:
     meta = result["meta"]
     doc  = Document()
 
-    # ── 기본 스타일 설정
     style = doc.styles["Normal"]
     style.font.name = "Arial"
     style.font.size = Pt(10)
 
-    # ── 제목
     title_p = doc.add_heading("글로벌 뉴스 클리핑 리포트", level=0)
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # ── 메타 정보
     meta_p = doc.add_paragraph()
     meta_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     meta_p.add_run(
@@ -124,7 +115,7 @@ def build_docx(result: dict) -> bytes:
     ).font.size = Pt(9)
     doc.add_paragraph()
 
-    def add_section(heading: str, articles: list, show_orig: bool = True):
+    def add_section(heading: str, articles: list):
         doc.add_heading(heading, level=1)
         if not articles:
             doc.add_paragraph("수집된 기사가 없습니다.").italic = True
@@ -138,21 +129,18 @@ def build_docx(result: dict) -> bytes:
             flag       = a.get("flag", "")
             date       = (a.get("date", "") or "")[:10]
 
-            # 제목 (하이퍼링크 스타일)
-            p = doc.add_paragraph(style="List Bullet")
+            p   = doc.add_paragraph(style="List Bullet")
             run = p.add_run(title_ko)
             run.font.bold = True
             run.font.color.rgb = RGBColor(0x0F, 0x34, 0x60)
 
-            # 원문 제목 (무신사 섹션 외)
-            if show_orig and title_orig and title_orig != title_ko:
+            if title_orig and title_orig != title_ko:
                 orig_p = doc.add_paragraph()
                 orig_p.paragraph_format.left_indent = Inches(0.3)
                 r = orig_p.add_run(f"원문: {title_orig}")
                 r.font.size = Pt(8.5)
                 r.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
 
-            # 출처 + 날짜 + URL
             meta_p = doc.add_paragraph()
             meta_p.paragraph_format.left_indent = Inches(0.3)
             meta_r = meta_p.add_run(f"{flag} {source}" + (f"  |  {date}" if date else "") + f"\n{url}")
@@ -161,12 +149,10 @@ def build_docx(result: dict) -> bytes:
 
             doc.add_paragraph()
 
-    add_section("📰 무신사 해외 보도", result["musinsa"], show_orig=False)
-    add_section("🇯🇵 일본 산업 이슈",  result["japan"])
-    add_section("🇨🇳 중국 산업 이슈",  result["china"])
-    add_section("🇹🇼 대만 산업 이슈",  result["taiwan"])
+    add_section("🇯🇵 일본 산업 이슈", result["japan"])
+    add_section("🇨🇳 중국 산업 이슈", result["china"])
+    add_section("🇹🇼 대만 산업 이슈", result["taiwan"])
 
-    # 푸터
     doc.add_paragraph()
     footer_p = doc.add_paragraph("* 본 리포트는 자동 수집·Google 번역된 내용으로, 원문 확인을 권장합니다.")
     footer_p.runs[0].font.size = Pt(8)
@@ -177,7 +163,7 @@ def build_docx(result: dict) -> bytes:
     return buf.getvalue()
 
 
-# ─── 사이드바 ────────────────────────────────────────────────────────────────
+# ─── 사이드바 ─────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.markdown("## ⚙️ 검색 설정")
@@ -185,7 +171,7 @@ with st.sidebar:
     preset_keywords = list(KEYWORD_TRANSLATIONS.keys()) + ["직접 입력"]
     selected_preset = st.selectbox("키워드 프리셋", preset_keywords, index=1)
     if selected_preset == "직접 입력":
-        keyword = st.text_input("키워드 직접 입력", placeholder="예: 지속가능성")
+        keyword = st.text_input("키워드 직접 입력", placeholder="예: 패션 브랜드")
     else:
         keyword = selected_preset
 
@@ -210,7 +196,7 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-# ─── 헤더 ───────────────────────────────────────────────────────────────────
+# ─── 헤더 ────────────────────────────────────────────────────────────────────
 
 st.markdown("""
 <div class="main-header">
@@ -219,7 +205,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ─── 실행 ───────────────────────────────────────────────────────────────────
+# ─── 실행 ────────────────────────────────────────────────────────────────────
 
 if "result" not in st.session_state:
     st.session_state.result = None
@@ -256,26 +242,30 @@ if run_btn:
         status_ph.error(f"오류 발생: {e}")
         prog_bar.empty()
 
-# ─── 결과 표시 ───────────────────────────────────────────────────────────────
+# ─── 결과 표시 ────────────────────────────────────────────────────────────────
 
 if st.session_state.result:
     result = st.session_state.result
     meta   = result["meta"]
 
-    # 통계
-    counts = {k: len(result[k]) for k in ["musinsa", "japan", "china", "taiwan"]}
+    # 통계 (총 수집 + 국가별 3개 = 컬럼 4개)
+    counts = {k: len(result[k]) for k in ["japan", "china", "taiwan"]}
     total  = sum(counts.values())
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     for col, (label, key) in zip(
-        [c1, c2, c3, c4, c5],
-        [("총 수집", None), ("📰 무신사", "musinsa"), ("🇯🇵 일본", "japan"), ("🇨🇳 중국", "china"), ("🇹🇼 대만", "taiwan")]
+        [c1, c2, c3, c4],
+        [("총 수집", None), ("🇯🇵 일본", "japan"), ("🇨🇳 중국", "china"), ("🇹🇼 대만", "taiwan")]
     ):
         n = total if key is None else counts[key]
-        col.markdown(f'<div class="stat-box"><div class="stat-num">{n}</div><div class="stat-label">{label}</div></div>', unsafe_allow_html=True)
+        col.markdown(
+            f'<div class="stat-box"><div class="stat-num">{n}</div>'
+            f'<div class="stat-label">{label}</div></div>',
+            unsafe_allow_html=True
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # [Fix 2] Word 다운로드 버튼
+    # Word 다운로드
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
     try:
         docx_bytes = build_docx(result)
@@ -290,33 +280,26 @@ if st.session_state.result:
 
     st.divider()
 
-    # 탭
-    t1, t2, t3, t4 = st.tabs([
-        f"📰 무신사 ({counts['musinsa']})",
+    # 탭 (국가별 3개)
+    t1, t2, t3 = st.tabs([
         f"🇯🇵 일본 ({counts['japan']})",
         f"🇨🇳 중국 ({counts['china']})",
         f"🇹🇼 대만 ({counts['taiwan']})",
     ])
 
     with t1:
-        if result["musinsa"]:
-            for a in result["musinsa"]: render_card(a, is_musinsa=True)
-        else:
-            st.markdown('<div class="empty-state">🔍 무신사 관련 기사가 없습니다.</div>', unsafe_allow_html=True)
-
-    with t2:
         if result["japan"]:
             for a in result["japan"]: render_card(a)
         else:
             st.markdown('<div class="empty-state">🔍 수집된 일본 기사가 없습니다.</div>', unsafe_allow_html=True)
 
-    with t3:
+    with t2:
         if result["china"]:
             for a in result["china"]: render_card(a)
         else:
             st.markdown('<div class="empty-state">🔍 수집된 중국 기사가 없습니다.</div>', unsafe_allow_html=True)
 
-    with t4:
+    with t3:
         if result["taiwan"]:
             for a in result["taiwan"]: render_card(a)
         else:
@@ -331,7 +314,7 @@ else:
             <strong>뉴스 수집 시작</strong> 버튼을 눌러주세요.
         </div>
         <div style="font-size:0.85rem;margin-top:1rem;">
-            일본 · 중국 · 대만 총 16개 매체에서 기사를 수집하고<br>
+            일본 · 중국 · 대만 매체에서 기사를 수집하고<br>
             Google 번역으로 한국어 제목을 자동 생성합니다.
         </div>
     </div>
