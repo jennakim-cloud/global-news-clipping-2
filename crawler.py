@@ -57,15 +57,22 @@ SOURCES = {
         },
     ],
     "china": [
-        {"name": "界面新闻",          "url": "https://www.jiemian.com",     "search_url": "https://www.jiemian.com/search.html?keywords={keyword}",   "language": "zh", "flag": "🇨🇳"},
-        {"name": "36氪",              "url": "https://36kr.com",            "search_url": "https://36kr.com/search/articles/{keyword}",               "language": "zh", "flag": "🇨🇳"},
-        {"name": "亿邦动力",          "url": "https://www.ebrun.com",       "search_url": "https://www.ebrun.com/search/?q={keyword}",                "language": "zh", "flag": "🇨🇳"},
-        {"name": "WWD Greater China", "url": "https://wwdgreaterchina.com", "search_url": "https://wwdgreaterchina.com/?s={keyword}",                 "language": "zh", "flag": "🇨🇳"},
-        {"name": "Vogue China",       "url": "https://www.vogue.com.cn",    "search_url": "https://www.vogue.com.cn/search?q={keyword}",              "language": "zh", "flag": "🇨🇳"},
-        {"name": "第一财经",          "url": "https://www.yicai.com",       "search_url": "https://www.yicai.com/search/?keys={keyword}",             "language": "zh", "flag": "🇨🇳"},
-        {"name": "赢商网",            "url": "https://m.winshang.com",      "search_url": "https://m.winshang.com/search.html?keyword={keyword}",     "language": "zh", "flag": "🇨🇳"},
-        {"name": "新浪",              "url": "https://www.sina.com.cn",     "search_url": "https://search.sina.com.cn/?q={keyword}&range=all&c=news", "language": "zh", "flag": "🇨🇳"},
-        {"name": "Luxe.co",           "url": "https://luxe.co",             "search_url": "https://luxe.co/?s={keyword}",                             "language": "zh", "flag": "🇨🇳"},
+        {
+            "name": "百度新闻 (Baidu News)",
+            "url": "https://news.baidu.com",
+            "search_url": "https://news.baidu.com/ns?word={keyword}&tn=news&from=news&ie=utf-8&rn=20",
+            "language": "zh",
+            "flag": "🇨🇳",
+            "parser": "baidu_news",
+        },
+        {
+            "name": "搜狗新闻 (Sogou News)",
+            "url": "https://news.sogou.com",
+            "search_url": "https://news.sogou.com/news?query={keyword}&ie=utf8",
+            "language": "zh",
+            "flag": "🇨🇳",
+            "parser": "sogou_news",
+        },
     ],
     "taiwan": [
         {"name": "數位時代", "url": "https://www.bnext.com.tw", "search_url": "https://www.bnext.com.tw/search/{keyword}",  "language": "tw", "flag": "🇹🇼"},
@@ -274,7 +281,215 @@ class NewsCrawler:
 
         return results[:20]
 
-    # ── 범용 HTML 파서 ────────────────────────────────────────────────────────
+    # ── 바이두 뉴스 파서 ─────────────────────────────────────────────────────────
+
+    def parse_baidu_news(self, soup: BeautifulSoup) -> list[dict]:
+        """
+        百度新闻 검색 결과 파서.
+
+        HTML 구조 (서버사이드 렌더링):
+          div.result  또는  div.news-box  >
+            h3.c-title > a[href]          ← 제목 + 링크
+            p.c-author > span             ← 매체명·날짜 혼재
+            div.c-summary / p.c-summary   ← 요약 (선택)
+        날짜는 "2小时前", "今天 14:30", "2026年02月20日" 등 다양.
+        """
+        results = []
+        seen = set()
+
+        # 결과 컨테이너: div.result 또는 div[class*="result"]
+        containers = (
+            soup.select("div.result") or
+            soup.select("div[class*='result']") or
+            soup.select("div.news-box") or
+            soup.find_all("div", class_=re.compile(r"^result"))
+        )
+
+        for item in containers:
+            # ── 제목 + URL ──
+            title_tag = (
+                item.select_one("h3.c-title > a") or
+                item.select_one("h3 > a") or
+                item.select_one("a.news-title") or
+                item.find("h3")
+            )
+            if not title_tag:
+                continue
+
+            a_tag = title_tag if title_tag.name == "a" else title_tag.find("a", href=True)
+            if not a_tag:
+                continue
+
+            title = clean_text(title_tag.get_text())
+            url   = a_tag.get("href", "")
+            if not url or len(title) < 5 or url in seen:
+                continue
+            seen.add(url)
+
+            # ── 날짜 ──
+            # 바이두는 날짜를 span.c-author, p.c-author, span[class*="time"] 등에 표시
+            date_str = ""
+            for sel in ["span.c-author", "p.c-author", "span[class*='time']",
+                        "span[class*='date']", "cite"]:
+                tag = item.select_one(sel)
+                if tag:
+                    candidate = clean_text(tag.get_text())
+                    if parse_date(candidate):
+                        date_str = candidate
+                        break
+
+            # 날짜 태그에서 못 찾으면 텍스트 전체에서 패턴 탐색
+            if not date_str:
+                raw = item.get_text(" ", strip=True)
+                # 중국식 상대시간: N小时前, N分钟前, 昨天, 今天
+                rel = re.search(r"(\d+小时前|\d+分钟前|昨天\s*\d+:\d+|今天\s*\d+:\d+|刚刚)", raw)
+                if rel:
+                    date_str = rel.group(0)
+                else:
+                    for pattern, _ in DATE_PATTERNS:
+                        m = re.search(pattern, raw)
+                        if m:
+                            date_str = m.group(0)
+                            break
+
+            if not self.is_within_cutoff_baidu(date_str):
+                continue
+
+            # ── 매체명 ──
+            media_tag = (
+                item.select_one("span.c-author") or
+                item.select_one("cite") or
+                item.select_one("p.c-author")
+            )
+            media = clean_text(media_tag.get_text()).split()[0] if media_tag else ""
+
+            results.append({
+                "title": title,
+                "url":   url,
+                "date":  date_str,
+                "media": media,
+            })
+
+        return results[:20]
+
+    def is_within_cutoff_baidu(self, date_str: str) -> bool:
+        """
+        바이두 상대시간(N小时前, 昨天, 今天 등) + 절대날짜 모두 처리.
+        날짜 불명 → False.
+        """
+        if not date_str:
+            return False
+        now = datetime.now()
+        s = date_str.strip()
+
+        # 상대시간
+        if "分钟前" in s:
+            m = re.search(r"(\d+)", s)
+            dt = now - timedelta(minutes=int(m.group(1))) if m else now
+            return dt >= self.cutoff
+        if "小时前" in s:
+            m = re.search(r"(\d+)", s)
+            dt = now - timedelta(hours=int(m.group(1))) if m else now
+            return dt >= self.cutoff
+        if "刚刚" in s:
+            return True
+        if "今天" in s or "今日" in s:
+            return True
+        if "昨天" in s or "昨日" in s:
+            return (now - timedelta(days=1)) >= self.cutoff
+
+        # 절대날짜
+        dt = parse_date(s)
+        if dt is None:
+            return False
+        return dt >= self.cutoff
+
+    # ── 소우거우 뉴스 파서 ───────────────────────────────────────────────────────
+
+    def parse_sogou_news(self, soup: BeautifulSoup) -> list[dict]:
+        """
+        搜狗新闻 검색 결과 파서.
+
+        HTML 구조:
+          div.news-list > div.news-item  또는  ul > li.news-item
+            h3 > a[href]                 ← 제목 + 링크
+            span.time / span.date        ← 날짜
+            span.src / a.src             ← 매체명
+        """
+        results = []
+        seen = set()
+
+        containers = (
+            soup.select("div.news-item") or
+            soup.select("li.news-item") or
+            soup.select("div.vrNews") or          # 소우거우 뉴스 대표 컨테이너
+            soup.select("div[class*='news']") or
+            soup.find_all("div", class_=re.compile(r"item|result|news", re.I))
+        )
+
+        for item in containers:
+            # ── 제목 + URL ──
+            h_tag = item.find(["h3", "h2", "h4"])
+            if not h_tag:
+                continue
+            a_tag = h_tag.find("a", href=True) or item.find("a", href=True)
+            if not a_tag:
+                continue
+
+            title = clean_text(h_tag.get_text())
+            url   = a_tag.get("href", "")
+            if not url or len(title) < 5 or url in seen:
+                continue
+            # 소우거우 내부 리다이렉트 URL 처리
+            if url.startswith("/"):
+                url = "https://news.sogou.com" + url
+            seen.add(url)
+
+            # ── 날짜 ──
+            date_str = ""
+            for sel in ["span.time", "span.date", "span[class*='time']",
+                        "span[class*='date']", "em.time", "i.time"]:
+                tag = item.select_one(sel)
+                if tag:
+                    candidate = clean_text(tag.get_text())
+                    if self.is_within_cutoff_baidu(candidate):  # 상대시간 공용
+                        date_str = candidate
+                        break
+
+            if not date_str:
+                raw = item.get_text(" ", strip=True)
+                rel = re.search(r"(\d+小时前|\d+分钟前|昨天\s*\d+:\d+|今天\s*\d+:\d+|刚刚)", raw)
+                if rel:
+                    date_str = rel.group(0)
+                else:
+                    for pattern, _ in DATE_PATTERNS:
+                        m = re.search(pattern, raw)
+                        if m:
+                            date_str = m.group(0)
+                            break
+
+            if not self.is_within_cutoff_baidu(date_str):
+                continue
+
+            # ── 매체명 ──
+            src_tag = (
+                item.select_one("span.src") or
+                item.select_one("a.src") or
+                item.select_one("span[class*='source']") or
+                item.select_one("cite")
+            )
+            media = clean_text(src_tag.get_text()) if src_tag else ""
+
+            results.append({
+                "title": title,
+                "url":   url,
+                "date":  date_str,
+                "media": media,
+            })
+
+        return results[:20]
+
+        # ── 범용 HTML 파서 ────────────────────────────────────────────────────────
 
     def _find_date_in_tag(self, tag) -> str:
         t = tag.find("time")
@@ -332,9 +547,14 @@ class NewsCrawler:
         parser_name = source.get("parser", "generic")
 
         if parser_name == "google_news_rss":
-            # RSS는 raw XML로 가져와서 ET로 파싱
             raw = self.fetch_raw(search_url)
             results = self.parse_google_news_rss(raw, source.get("flag", "🇯🇵")) if raw else []
+        elif parser_name == "baidu_news":
+            soup = self.fetch(search_url)
+            results = self.parse_baidu_news(soup) if soup else []
+        elif parser_name == "sogou_news":
+            soup = self.fetch(search_url)
+            results = self.parse_sogou_news(soup) if soup else []
         else:
             soup    = self.fetch(search_url)
             results = self.parse_generic(soup, source["url"]) if soup else []
