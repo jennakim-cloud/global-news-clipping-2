@@ -239,6 +239,24 @@ class NewsCrawler:
             return False
         return dt >= self.cutoff
 
+    def _resolve_redirect(self, url: str, timeout: int = 10) -> str:
+    """
+    소우거우 등 트래킹 리다이렉트 URL을 따라가 최종 실제 URL 반환.
+    실패 시 빈 문자열 반환 → 해당 기사 건너뜀.
+    """
+    try:
+        resp = self.session.get(
+            url, timeout=timeout,
+            allow_redirects=True,
+        )
+        final = resp.url
+        # 소우거우 오류 페이지로 끝났으면 제외
+        if "sogou.com" in final and ("error" in final or "404" in final):
+            return ""
+        return final
+    except Exception:
+        return ""
+
     # ── Google News RSS 파서 ──────────────────────────────────────────────────
 
     def parse_google_news_rss(self, raw_xml: str, source_flag: str = "🇯🇵") -> list[dict]:
@@ -400,6 +418,11 @@ class NewsCrawler:
                 continue
             if url.startswith("/"):
                 url = "https://news.sogou.com" + url
+            # 소우거우 트래킹 리다이렉트 → 실제 기사 URL로 교체
+            if "news.sogou.com/link" in url:
+                url = self._resolve_redirect(url)
+            if not url:
+                continue
             seen.add(url)
 
             date_str = ""
