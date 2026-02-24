@@ -33,7 +33,7 @@ KEYWORD_TRANSLATIONS = {
     "이커머스":    {"ja": "EC",                    "zh": "电商",       "tw": "電商"},
     "패션":        {"ja": "ファッション",            "zh": "时尚",       "tw": "時尚"},
     "리테일":      {"ja": "リテール",               "zh": "零售",       "tw": "零售"},
-    "뷰티":        {"ja": "ビューティー",            "zh": "美妆",       "tw": "美妝"},
+    "뷰티":        {"ja": "ビューティー",            "zh": "美妝",       "tw": "美妝"},
     "SPA":         {"ja": "SPA",                   "zh": "SPA",        "tw": "SPA"},
     "패션 브랜드": {"ja": "ファッションブランド",    "zh": "时尚品牌",   "tw": "時尚品牌"},
     "유니클로":    {"ja": "ユニクロ",               "zh": "优衣库",     "tw": "Uniqlo"},
@@ -116,6 +116,7 @@ def parse_date(text: str):
         return None
     text = text.strip()
 
+    # RFC 2822: "20 Feb 2026 03:00:00 GMT"
     m = RFC2822_PATTERN.search(text)
     if m:
         day, mon_str, year, time_str = m.groups()
@@ -125,6 +126,7 @@ def parse_date(text: str):
         except (ValueError, KeyError):
             pass
 
+    # ISO 타임존 제거 후 일반 패턴
     text_clean = re.sub(r"[+Z]\d{2}:?\d{0,2}$", "", text)
     for pattern, fmt in DATE_PATTERNS:
         m = re.search(pattern, text_clean)
@@ -213,7 +215,7 @@ class NewsCrawler:
 
     def is_within_cutoff_cn(self, date_str: str) -> bool:
         """
-        중국어 상대시간(N小时前, N分钟前, 今天, 昨天, 刚刚) + 절대날짜 모두 처리.
+        중국어 상대시간(N小时前, N分钟前, 今天, 昨天, 刚刚) + 절대날짜 처리.
         날짜 불명 → False.
         """
         if not date_str:
@@ -240,29 +242,26 @@ class NewsCrawler:
         return dt >= self.cutoff
 
     def _resolve_redirect(self, url: str, timeout: int = 10) -> str:
-    """
-    소우거우 등 트래킹 리다이렉트 URL을 따라가 최종 실제 URL 반환.
-    실패 시 빈 문자열 반환 → 해당 기사 건너뜀.
-    """
-    try:
-        resp = self.session.get(
-            url, timeout=timeout,
-            allow_redirects=True,
-        )
-        final = resp.url
-        # 소우거우 오류 페이지로 끝났으면 제외
-        if "sogou.com" in final and ("error" in final or "404" in final):
+        """
+        소우거우 등 트래킹 리다이렉트 URL을 따라가 최종 실제 URL 반환.
+        실패 또는 소우거우 오류 페이지 도달 시 빈 문자열 반환.
+        """
+        try:
+            resp = self.session.get(url, timeout=timeout, allow_redirects=True)
+            final = resp.url
+            # 소우거우 오류 페이지로 끝난 경우 제외
+            if "sogou.com" in final and ("error" in final or "404" in final):
+                return ""
+            return final
+        except Exception:
             return ""
-        return final
-    except Exception:
-        return ""
 
     # ── Google News RSS 파서 ──────────────────────────────────────────────────
 
-    def parse_google_news_rss(self, raw_xml: str, source_flag: str = "🇯🇵") -> list[dict]:
+    def parse_google_news_rss(self, raw_xml: str, source_flag: str = "🇯🇵") -> list:
         """
         Google News RSS XML 파싱.
-        <item> 구조: <title>제목 - 매체명</title> / <link> / <pubDate> / <source>
+        <item>: <title>제목 - 매체명</title> / <link> / <pubDate> / <source>
         """
         results = []
         try:
@@ -314,7 +313,7 @@ class NewsCrawler:
 
     # ── 바이두 뉴스 파서 ──────────────────────────────────────────────────────
 
-    def parse_baidu_news(self, soup: BeautifulSoup) -> list[dict]:
+    def parse_baidu_news(self, soup: BeautifulSoup) -> list:
         """
         百度新闻 검색 결과 파서.
         div.result > h3.c-title > a  +  span.c-author (날짜·매체)
@@ -388,10 +387,10 @@ class NewsCrawler:
 
     # ── 소우거우 뉴스 파서 ────────────────────────────────────────────────────
 
-    def parse_sogou_news(self, soup: BeautifulSoup) -> list[dict]:
+    def parse_sogou_news(self, soup: BeautifulSoup) -> list:
         """
         搜狗新闻 검색 결과 파서.
-        div.news-item / div.vrNews > h3 > a  +  span.time / span.src
+        트래킹 리다이렉트 URL(news.sogou.com/link?url=...)을 실제 URL로 교체.
         """
         results = []
         seen = set()
@@ -414,17 +413,24 @@ class NewsCrawler:
 
             title = clean_text(h_tag.get_text())
             url   = a_tag.get("href", "")
-            if not url or len(title) < 5 or url in seen:
+            if not url or len(title) < 5:
                 continue
+
+            # 상대 URL → 절대 URL
             if url.startswith("/"):
                 url = "https://news.sogou.com" + url
+
             # 소우거우 트래킹 리다이렉트 → 실제 기사 URL로 교체
             if "news.sogou.com/link" in url:
                 url = self._resolve_redirect(url)
-            if not url:
+                if not url:
+                    continue  # 리다이렉트 실패 시 건너뜀
+
+            if url in seen:
                 continue
             seen.add(url)
 
+            # 날짜 탐색
             date_str = ""
             for sel in ["span.time", "span.date", "span[class*='time']",
                         "span[class*='date']", "em.time", "i.time"]:
@@ -482,7 +488,7 @@ class NewsCrawler:
                 return m.group(0)
         return ""
 
-    def parse_generic(self, soup: BeautifulSoup, base_url: str) -> list[dict]:
+    def parse_generic(self, soup: BeautifulSoup, base_url: str) -> list:
         candidates = []
         seen = set()
 
@@ -515,7 +521,7 @@ class NewsCrawler:
 
     # ── 매체 검색 (파서 분기) ─────────────────────────────────────────────────
 
-    def search_source(self, source: dict, keyword: str) -> list[dict]:
+    def search_source(self, source: dict, keyword: str) -> list:
         search_url  = source["search_url"].format(keyword=quote(keyword))
         parser_name = source.get("parser", "generic")
 
@@ -554,7 +560,7 @@ class NewsCrawler:
 
         return results
 
-    def crawl_category(self, category: str, keyword_ko: str, progress_callback=None) -> list[dict]:
+    def crawl_category(self, category: str, keyword_ko: str, progress_callback=None) -> list:
         all_articles = []
         for source in SOURCES.get(category, []):
             keyword = translate_keyword_to_lang(keyword_ko, source["language"])
@@ -587,6 +593,11 @@ def run_pipeline(
     on_status=None,
     on_progress=None,
 ) -> dict:
+    """
+    수집 → 중복제거 → 번역 파이프라인.
+    반환값: {"japan": [...], "china": [...], "taiwan": [...], "meta": {...}}
+    무신사 탭 제거 — 국가별 탭으로만 표시.
+    """
     if active_categories is None:
         active_categories = ["japan", "china", "taiwan"]
 
@@ -621,19 +632,8 @@ def run_pipeline(
                 deduped.append(a)
         collected[cat] = deduped
 
-    # 무신사 기사 분리
-    musinsa     = []
-    musinsa_kws = ["무신사", "musinsa", "ムシンサ"]
-    for cat in active_categories:
-        flagged = [
-            a for a in collected[cat]
-            if any(k in a.get("title", "").lower() for k in musinsa_kws)
-        ]
-        musinsa.extend(flagged)
-        collected[cat] = [a for a in collected[cat] if a not in flagged]
-
     # 번역
-    all_t = musinsa + collected["japan"] + collected["china"] + collected["taiwan"]
+    all_t = collected["japan"] + collected["china"] + collected["taiwan"]
     _s(f"Google 번역 처리 중 (총 {len(all_t)}건)...")
 
     def _tcb(cur, total, source):
@@ -643,10 +643,9 @@ def run_pipeline(
     _p(1.0, "완료!")
 
     return {
-        "musinsa": musinsa,
-        "japan":   collected["japan"],
-        "china":   collected["china"],
-        "taiwan":  collected["taiwan"],
+        "japan":  collected["japan"],
+        "china":  collected["china"],
+        "taiwan": collected["taiwan"],
         "meta": {
             "keyword":      keyword_ko,
             "days":         days,
