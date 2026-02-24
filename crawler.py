@@ -1,9 +1,9 @@
 """
 crawler.py - 뉴스 수집 & Google 번역 모듈
 
-[일본] Google News RSS 기반 키워드 검색
-[중국] 바이두·소우거우 검색 엔진 + 개별 매체 병행 수집
-[대만] 매체별 HTML 크롤링
+[일본] Google News RSS (hl=ja, gl=JP)
+[중국] 바이두 검색 엔진 + 개별 매체 병행 수집
+[대만] Google News RSS (hl=zh-TW, gl=TW)
 """
 
 import requests
@@ -62,12 +62,6 @@ SOURCES = {
             "search_url": "https://news.baidu.com/ns?word={keyword}&tn=news&from=news&ie=utf-8&rn=20",
             "language": "zh", "flag": "🇨🇳", "parser": "baidu_news",
         },
-        {
-            "name": "搜狗新闻",
-            "url": "https://news.sogou.com",
-            "search_url": "https://news.sogou.com/news?query={keyword}&ie=utf8",
-            "language": "zh", "flag": "🇨🇳", "parser": "sogou_news",
-        },
         # ── 개별 매체 ─────────────────────────────────────────────────────────
         {"name": "界面新闻",          "url": "https://www.jiemian.com",     "search_url": "https://www.jiemian.com/search.html?keywords={keyword}",    "language": "zh", "flag": "🇨🇳"},
         {"name": "36氪",              "url": "https://36kr.com",            "search_url": "https://36kr.com/search/articles/{keyword}",                "language": "zh", "flag": "🇨🇳"},
@@ -84,8 +78,14 @@ SOURCES = {
         {"name": "Ulife Media",       "url": "https://www.ulife-media.com", "search_url": "https://www.ulife-media.com/?s={keyword}",                  "language": "zh", "flag": "🇨🇳"},
     ],
     "taiwan": [
-        {"name": "數位時代", "url": "https://www.bnext.com.tw", "search_url": "https://www.bnext.com.tw/search/{keyword}",  "language": "tw", "flag": "🇹🇼"},
-        {"name": "工商時報", "url": "https://www.ctee.com.tw",  "search_url": "https://www.ctee.com.tw/search?q={keyword}", "language": "tw", "flag": "🇹🇼"},
+        {
+            "name": "Google News (台灣)",
+            "url": "https://news.google.com",
+            "search_url": "https://news.google.com/rss/search?q={keyword}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+            "language": "tw",
+            "flag": "🇹🇼",
+            "parser": "google_news_rss",
+        },
     ],
 }
 
@@ -116,7 +116,6 @@ def parse_date(text: str):
         return None
     text = text.strip()
 
-    # RFC 2822: "20 Feb 2026 03:00:00 GMT"
     m = RFC2822_PATTERN.search(text)
     if m:
         day, mon_str, year, time_str = m.groups()
@@ -126,7 +125,6 @@ def parse_date(text: str):
         except (ValueError, KeyError):
             pass
 
-    # ISO 타임존 제거 후 일반 패턴
     text_clean = re.sub(r"[+Z]\d{2}:?\d{0,2}$", "", text)
     for pattern, fmt in DATE_PATTERNS:
         m = re.search(pattern, text_clean)
@@ -241,27 +239,13 @@ class NewsCrawler:
             return False
         return dt >= self.cutoff
 
-    def _resolve_redirect(self, url: str, timeout: int = 10) -> str:
-        """
-        소우거우 등 트래킹 리다이렉트 URL을 따라가 최종 실제 URL 반환.
-        실패 또는 소우거우 오류 페이지 도달 시 빈 문자열 반환.
-        """
-        try:
-            resp = self.session.get(url, timeout=timeout, allow_redirects=True)
-            final = resp.url
-            # 소우거우 오류 페이지로 끝난 경우 제외
-            if "sogou.com" in final and ("error" in final or "404" in final):
-                return ""
-            return final
-        except Exception:
-            return ""
+    # ── Google News RSS 파서 (일본·대만 공용) ────────────────────────────────
 
-    # ── Google News RSS 파서 ──────────────────────────────────────────────────
-
-    def parse_google_news_rss(self, raw_xml: str, source_flag: str = "🇯🇵") -> list:
+    def parse_google_news_rss(self, raw_xml: str) -> list:
         """
         Google News RSS XML 파싱.
         <item>: <title>제목 - 매체명</title> / <link> / <pubDate> / <source>
+        일본(hl=ja)·대만(hl=zh-TW) 모두 동일 구조.
         """
         results = []
         try:
@@ -385,89 +369,6 @@ class NewsCrawler:
 
         return results[:20]
 
-    # ── 소우거우 뉴스 파서 ────────────────────────────────────────────────────
-
-    def parse_sogou_news(self, soup: BeautifulSoup) -> list:
-        """
-        搜狗新闻 검색 결과 파서.
-        트래킹 리다이렉트 URL(news.sogou.com/link?url=...)을 실제 URL로 교체.
-        """
-        results = []
-        seen = set()
-
-        containers = (
-            soup.select("div.news-item") or
-            soup.select("li.news-item") or
-            soup.select("div.vrNews") or
-            soup.select("div[class*='news']") or
-            soup.find_all("div", class_=re.compile(r"item|result|news", re.I))
-        )
-
-        for item in containers:
-            h_tag = item.find(["h3", "h2", "h4"])
-            if not h_tag:
-                continue
-            a_tag = h_tag.find("a", href=True) or item.find("a", href=True)
-            if not a_tag:
-                continue
-
-            title = clean_text(h_tag.get_text())
-            url   = a_tag.get("href", "")
-            if not url or len(title) < 5:
-                continue
-
-            # 상대 URL → 절대 URL
-            if url.startswith("/"):
-                url = "https://news.sogou.com" + url
-
-            # 소우거우 트래킹 리다이렉트 → 실제 기사 URL로 교체
-            if "news.sogou.com/link" in url:
-                url = self._resolve_redirect(url)
-                if not url:
-                    continue  # 리다이렉트 실패 시 건너뜀
-
-            if url in seen:
-                continue
-            seen.add(url)
-
-            # 날짜 탐색
-            date_str = ""
-            for sel in ["span.time", "span.date", "span[class*='time']",
-                        "span[class*='date']", "em.time", "i.time"]:
-                tag = item.select_one(sel)
-                if tag:
-                    candidate = clean_text(tag.get_text())
-                    if self.is_within_cutoff_cn(candidate):
-                        date_str = candidate
-                        break
-
-            if not date_str:
-                raw = item.get_text(" ", strip=True)
-                rel = re.search(r"(\d+小时前|\d+分钟前|昨天\s*\d+:\d+|今天\s*\d+:\d+|刚刚)", raw)
-                if rel:
-                    date_str = rel.group(0)
-                else:
-                    for pattern, _ in DATE_PATTERNS:
-                        m = re.search(pattern, raw)
-                        if m:
-                            date_str = m.group(0)
-                            break
-
-            if not self.is_within_cutoff_cn(date_str):
-                continue
-
-            src_tag = (
-                item.select_one("span.src") or
-                item.select_one("a.src") or
-                item.select_one("span[class*='source']") or
-                item.select_one("cite")
-            )
-            media = clean_text(src_tag.get_text()) if src_tag else ""
-
-            results.append({"title": title, "url": url, "date": date_str, "media": media})
-
-        return results[:20]
-
     # ── 범용 HTML 파서 ────────────────────────────────────────────────────────
 
     def _find_date_in_tag(self, tag) -> str:
@@ -527,13 +428,10 @@ class NewsCrawler:
 
         if parser_name == "google_news_rss":
             raw     = self.fetch_raw(search_url)
-            results = self.parse_google_news_rss(raw, source.get("flag", "🇯🇵")) if raw else []
+            results = self.parse_google_news_rss(raw) if raw else []
         elif parser_name == "baidu_news":
             soup    = self.fetch(search_url)
             results = self.parse_baidu_news(soup) if soup else []
-        elif parser_name == "sogou_news":
-            soup    = self.fetch(search_url)
-            results = self.parse_sogou_news(soup) if soup else []
         else:
             soup    = self.fetch(search_url)
             results = self.parse_generic(soup, source["url"]) if soup else []
@@ -596,7 +494,6 @@ def run_pipeline(
     """
     수집 → 중복제거 → 번역 파이프라인.
     반환값: {"japan": [...], "china": [...], "taiwan": [...], "meta": {...}}
-    무신사 탭 제거 — 국가별 탭으로만 표시.
     """
     if active_categories is None:
         active_categories = ["japan", "china", "taiwan"]
