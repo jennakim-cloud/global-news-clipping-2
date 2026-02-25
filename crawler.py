@@ -66,6 +66,12 @@ SOURCES = {
             "search_url": "https://news.baidu.com/ns?word={keyword}&tn=news&from=news&ie=utf-8&rn=20",
             "language": "zh", "flag": "🇨🇳", "parser": "baidu_news",
         },
+        {
+            "name": "搜狗新闻",
+            "url": "https://news.sogou.com",
+            "search_url": "https://news.sogou.com/news?query={keyword}&ie=utf8",
+            "language": "zh", "flag": "🇨🇳", "parser": "sogou_news",
+        },
         # ── 개별 매체 ─────────────────────────────────────────────────────────
         {"name": "界面新闻",          "url": "https://www.jiemian.com",     "search_url": "https://www.jiemian.com/search.html?keywords={keyword}",    "language": "zh", "flag": "🇨🇳"},
         {"name": "36氪",              "url": "https://36kr.com",            "search_url": "https://36kr.com/search/articles/{keyword}",                "language": "zh", "flag": "🇨🇳"},
@@ -373,6 +379,81 @@ class NewsCrawler:
 
         return results[:20]
 
+
+    # ── 소우거우 뉴스 파서 ────────────────────────────────────────────────────
+
+    def parse_sogou_news(self, soup: BeautifulSoup) -> list:
+        """
+        搜狗新闻 검색 결과 파서.
+        ※ 기사 URL이 소우거우 트래킹 URL(news.sogou.com/link?url=...)일 수 있음.
+        """
+        results = []
+        seen = set()
+
+        containers = (
+            soup.select("div.news-item") or
+            soup.select("li.news-item") or
+            soup.select("div.vrNews") or
+            soup.select("div[class*='news']") or
+            soup.find_all("div", class_=re.compile(r"item|result|news", re.I))
+        )
+
+        for item in containers:
+            h_tag = item.find(["h3", "h2", "h4"])
+            if not h_tag:
+                continue
+            a_tag = h_tag.find("a", href=True) or item.find("a", href=True)
+            if not a_tag:
+                continue
+
+            title = clean_text(h_tag.get_text())
+            url   = a_tag.get("href", "")
+            if not url or len(title) < 5:
+                continue
+            if url.startswith("/"):
+                url = "https://news.sogou.com" + url
+            if url in seen:
+                continue
+            seen.add(url)
+
+            # 날짜 탐색
+            date_str = ""
+            for sel in ["span.time", "span.date", "span[class*='time']",
+                        "span[class*='date']", "em.time", "i.time"]:
+                tag = item.select_one(sel)
+                if tag:
+                    candidate = clean_text(tag.get_text())
+                    if self.is_within_cutoff_cn(candidate):
+                        date_str = candidate
+                        break
+
+            if not date_str:
+                raw = item.get_text(" ", strip=True)
+                rel = re.search(r"(\d+小时前|\d+分钟前|昨天\s*\d+:\d+|今天\s*\d+:\d+|刚刚)", raw)
+                if rel:
+                    date_str = rel.group(0)
+                else:
+                    for pattern, _ in DATE_PATTERNS:
+                        m = re.search(pattern, raw)
+                        if m:
+                            date_str = m.group(0)
+                            break
+
+            if not self.is_within_cutoff_cn(date_str):
+                continue
+
+            src_tag = (
+                item.select_one("span.src") or
+                item.select_one("a.src") or
+                item.select_one("span[class*='source']") or
+                item.select_one("cite")
+            )
+            media = clean_text(src_tag.get_text()) if src_tag else ""
+
+            results.append({"title": title, "url": url, "date": date_str, "media": media})
+
+        return results[:20]
+
     # ── 범용 HTML 파서 ────────────────────────────────────────────────────────
 
     def _find_date_in_tag(self, tag) -> str:
@@ -436,6 +517,9 @@ class NewsCrawler:
         elif parser_name == "baidu_news":
             soup    = self.fetch(search_url)
             results = self.parse_baidu_news(soup) if soup else []
+        elif parser_name == "sogou_news":
+            soup    = self.fetch(search_url)
+            results = self.parse_sogou_news(soup) if soup else []
         else:
             soup    = self.fetch(search_url)
             results = self.parse_generic(soup, source["url"]) if soup else []
